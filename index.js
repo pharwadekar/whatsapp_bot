@@ -4,7 +4,10 @@ const qrcode = require("qrcode-terminal");
 const OpenAI = require("openai");
 
 const client = new Client({
-  authStrategy: new LocalAuth(), // keeps session saved
+  authStrategy: new LocalAuth(), // keeps session saved locally
+  puppeteer: {
+    args: ['--no-sandbox', '--disable-setuid-sandbox'], // Required for cloud hosting like Render
+  }
 });
 
 const openai = new OpenAI({
@@ -101,8 +104,9 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-app.listen(3000, '0.0.0.0', () => {
-  console.log("🌐 Approval UI available on port 3000 (http://localhost:3000)");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Approval UI available on port ${PORT}`);
 });
 
 // ===== CONFIG =====
