@@ -1,14 +1,31 @@
 require("dotenv").config();
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const fs = require('fs');
+const path = require('path');
+
+// --- PATCH WHATSAPP-WEB.JS BUGS AUTOMATICALLY ---
+// whatsapp-web.js crashes with an ENOENT error on RemoteAuth because it tries
+// to read a 'Default' folder that doesn't always exist. This patches the library automatically!
+const remoteAuthPath = path.join(__dirname, 'node_modules', 'whatsapp-web.js', 'src', 'authStrategies', 'RemoteAuth.js');
+if (fs.existsSync(remoteAuthPath)) {
+  let content = fs.readFileSync(remoteAuthPath, 'utf8');
+  if (content.includes('const sessionFiles = await fs.promises.readdir(dir);')) {
+    content = content.replace(
+      'const sessionFiles = await fs.promises.readdir(dir);',
+      'const sessionFiles = await fs.promises.readdir(dir).catch(() => []);'
+    );
+    fs.writeFileSync(remoteAuthPath, content);
+    console.log('[DEBUG] Patched RemoteAuth.js to prevent ENOENT crash');
+  }
+}
+
+const { Client, RemoteAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const OpenAI = require("openai");
+const mongoose = require("mongoose");
+const { CustomMongoStore } = require("./CustomMongoStore");
 
-const client = new Client({
-  authStrategy: new LocalAuth(), // keeps session saved locally
-  puppeteer: {
-    args: ['--no-sandbox', '--disable-setuid-sandbox'], // Required for cloud hosting like Render
-  }
-});
+let client;
+let store;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -18,9 +35,33 @@ const openai = new OpenAI({
 const express = require('express');
 const app = express();
 app.use(express.json());
+
+// SECURITY: Lock down the entire web server with a username and password
+app.use((req, res, next) => {
+  const b64auth = (req.headers.authorization || '').split(' ')[1] || '';
+  const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
+  
+  // Checks for the ADMIN_PASSWORD environment variable
+  const expectedPassword = process.env.ADMIN_PASSWORD;
+
+  if (!expectedPassword) {
+    console.error("⚠️ SECURITY WARNING: ADMIN_PASSWORD is not set in your .env file!");
+    return res.status(500).send("Server configuration error.");
+  }
+
+  if (login === 'admin' && password === expectedPassword) {
+    return next();
+  }
+
+  // If wrong password, show standard browser login popup
+  res.set('WWW-Authenticate', 'Basic realm="Secure Area"');
+  res.status(401).send('Authentication required.');
+});
+
 app.use(express.static('public'));
 
 const pendingMessages = new Map();
+let currentQR = "";
 
 // Get the list of pending messages
 app.get('/api/pending', (req, res) => {
@@ -104,9 +145,28 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// QR Code UI for easy scanning
+app.get('/qr', (req, res) => {
+  if (currentQR) {
+    res.send(`
+      <html>
+        <body style="font-family: sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#f0f0f0;">
+          <div style="text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">
+            <h2>📱 Scan to Connect WhatsApp</h2>
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(currentQR)}" alt="QR Code" />
+            <p style="color: #666; margin-top: 20px;">Open WhatsApp > Linked Devices > Link a Device</p>
+          </div>
+        </body>
+      </html>
+    `);
+  } else {
+    res.send("<h2 style='text-align: center; margin-top: 50px; font-family: sans-serif;'>✅ Bot is connected or loading...</h2>");
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Approval UI available on port ${PORT}`);
+  console.log(`🌐 Approval UI available on port ${PORT}, if local on http://localhost:${PORT}`);
 });
 
 // ===== CONFIG =====
@@ -117,13 +177,17 @@ const USER_COOLDOWN_MS = 20000; // per-user cooldown
 let lastReplyTime = 0;
 const userLastReply = new Map();
 
+function setupClient() {
 // ===== QR =====
 client.on("qr", (qr) => {
+  currentQR = qr;
   qrcode.generate(qr, { small: true });
+  console.log("📱 QR Code generated! Go to /qr on your web UI to scan it easily.");
 });
 
 // ===== READY =====
 client.on("ready", () => {
+  currentQR = "";
   console.log("✅ Bot is ready!");
 });
 
@@ -134,6 +198,16 @@ client.on("change_state", (state) => {
 
 client.on("disconnected", async (reason) => {
   console.log("❌ Bot was disconnected! Reason:", reason);
+  currentQR = "";
+  
+  // Auto-heal: If you logout from your phone, or if the session corrupts,
+  // delete the remote session data in MongoDB!
+  if (store) {
+    store.delete({ session: 'RemoteAuth' }).then(() => {
+      console.log("🗑️ Cleared old/corrupted auth session data from MongoDB.");
+    }).catch(() => {});
+  }
+
   console.log("⚠️ Attempting to restart the client in 5 seconds...");
   setTimeout(async () => {
     try {
@@ -143,6 +217,17 @@ client.on("disconnected", async (reason) => {
       console.error("Error restarting client:", err);
     }
   }, 5000);
+});
+
+// ===== AUTH FAILURE (Corrupted Data) =====
+client.on("auth_failure", (msg) => {
+  console.error("❌ Authentication failure (corrupted login data)!", msg);
+  currentQR = "";
+  if (store) {
+    store.delete({ session: 'RemoteAuth' }).then(() => {
+      console.log("🗑️ Cleared corrupted auth session data from MongoDB. Restarting will generate a new QR.");
+    }).catch(() => {});
+  }
 });
 
 // ===== MESSAGE HANDLER =====
@@ -227,6 +312,7 @@ client.on("message_create", async (msg) => {
     console.error("Error:", err);
   }
 });
+}
 
 // ===== AI ROUTING & REPLIES =====
 async function generateReply(input, contextText) {
@@ -340,5 +426,33 @@ async function callAssistant(input, contextText) {
   }
 }
 
-// ===== START =====
-client.initialize();
+// ===== DB CONNECTION & START =====
+if (!process.env.MONGODB_URI) {
+  console.error("❌ MONGODB_URI is strictly required in .env");
+  process.exit(1);
+}
+
+mongoose.connect(process.env.MONGODB_URI).then(() => {
+  console.log("✅ Connected to MongoDB!");
+  store = new CustomMongoStore({ mongoose: mongoose });
+  client = new Client({
+    authStrategy: new RemoteAuth({        clientId: 'bot-session',      store: store,
+      backupSyncIntervalMs: 300000
+    }),
+    puppeteer: {
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote'],
+      headless: true
+    }
+  });
+  
+// Pre-create the Default folder to prevent RemoteAuth ENOENT crashes
+  const fs = require('fs');
+  const path = require('path');
+  const sessionPath = path.join(process.cwd(), '.wwebjs_auth', 'session-bot-session', 'Default');
+  fs.mkdirSync(sessionPath, { recursive: true });
+
+  setupClient();
+  client.initialize();
+}).catch(err => {
+  console.error("❌ MongoDB connection error:", err);
+});
