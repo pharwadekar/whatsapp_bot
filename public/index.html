@@ -11,16 +11,36 @@
     .meta { font-size: 12px; color: #666; margin-bottom: 10px; }
     .original { background: #e9ecef; padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 14px;}
     textarea { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; height: 100px; resize: vertical; margin-bottom: 10px; font-family: inherit;}
+    .composer { display: flex; gap: 8px; margin-bottom: 10px; }
+    .composer input { flex: 1; padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px;}
+    .composer button.regen { background: #007bff; color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-weight: bold; }
     .actions { display: flex; gap: 10px; justify-content: flex-end; }
-    button { padding: 10px 15px; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; flex: 1;}
+    button.btn-act { padding: 10px 15px; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; flex: 1;}
     .approve { background: #25d366; color: white; }
     .reject { background: #ff4b4b; color: white; }
     .empty { text-align: center; color: #888; margin-top: 50px;}
+
+    /* Chatbot styles */
+    .chatbot-panel { margin-top: 40px; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-top: 4px solid #007bff; }
+    .chatbot-panel h3 { margin-top: 0; margin-bottom: 10px; font-size: 16px; color: #333; }
+    #chat-output { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #ddd; font-size: 14px; height: 120px; resize: vertical; margin-bottom: 10px; font-family: inherit; background: #f9f9f9;}
+    .chat-controls { display: flex; gap: 8px; }
+    .chat-controls input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px;}
+    .chat-controls button { background: #007bff; color: white; border: none; border-radius: 6px; padding: 10px 15px; cursor: pointer; font-weight: bold; flex: none;}
   </style>
 </head>
 <body>
-  <h2>Pending Approvals</h2>
+  <h2>Bot Approval Dashboard</h2>
   <div id="container">Loading...</div>
+
+  <div class="chatbot-panel">
+    <h3>Mini ChatGPT (Side Helper)</h3>
+    <textarea id="chat-output" placeholder="AI answer will appear here... you can copy/paste it into a pending message above if needed." readonly></textarea>
+    <div class="chat-controls">
+      <input type="text" id="chat-input" placeholder="Ask AI a quick question..." onkeypress="if(event.key === 'Enter') askChatBot()" />
+      <button onclick="askChatBot()" id="chat-btn">Ask</button>
+    </div>
+  </div>
 
   <script>
     async function loadPending() {
@@ -40,14 +60,51 @@
         card.innerHTML = `
           <div class="meta">To: ${item.to}</div>
           <div class="original"><strong>Context/Trigger:</strong><br>${item.originalText}</div>
+          
+          <div class="composer">
+            <input type="text" id="prompt-${item.id}" placeholder="Ask AI to refine (e.g. 'make it funnier', or write a new custom prompt)" />
+            <button class="regen" onclick="regenerate('${item.id}')">Rewrite</button>
+          </div>
+
           <textarea id="reply-${item.id}">${item.replyText}</textarea>
           <div class="actions">
-            <button class="reject" onclick="reject('${item.id}')">Reject</button>
-            <button class="approve" onclick="approve('${item.id}')">Approve / Send</button>
+            <button class="btn-act reject" onclick="reject('${item.id}')">Reject</button>
+            <button class="btn-act approve" onclick="approve('${item.id}')">Approve / Send</button>
           </div>
         `;
         container.appendChild(card);
       });
+    }
+
+    async function regenerate(id) {
+      const promptInput = document.getElementById('prompt-' + id);
+      const prompt = promptInput.value.trim();
+      if (!prompt) return alert("Please enter an instruction for the AI.");
+      
+      const btn = promptInput.nextElementSibling;
+      btn.innerText = "Thinking...";
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/regenerate/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+          document.getElementById('reply-' + id).value = data.replyText;
+          promptInput.value = ""; // clear after success
+        } else {
+          alert("Failed to regenerate.");
+        }
+      } catch(e) {
+        alert("Error connecting to server.");
+      }
+      
+      btn.innerText = "Rewrite";
+      btn.disabled = false;
     }
 
     async function approve(id) {
@@ -65,6 +122,36 @@
     async function reject(id) {
       await fetch('/api/reject/' + id, { method: 'POST' });
       loadPending();
+    }
+
+    async function askChatBot() {
+      const input = document.getElementById('chat-input');
+      const output = document.getElementById('chat-output');
+      const btn = document.getElementById('chat-btn');
+      const prompt = input.value.trim();
+      
+      if(!prompt) return;
+
+      input.value = "";
+      output.value = "Thinking...";
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await res.json();
+        if(data.reply) {
+          output.value = data.reply;
+        } else {
+          output.value = "Error generating response.";
+        }
+      } catch(e) {
+        output.value = "Connection error.";
+      }
+      btn.disabled = false;
     }
 
     loadPending();

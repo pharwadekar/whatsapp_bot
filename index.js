@@ -62,6 +62,45 @@ app.post('/api/reject/:id', (req, res) => {
   }
 });
 
+// Regenerate a message
+app.post('/api/regenerate/:id', async (req, res) => {
+  const id = req.params.id;
+  const pending = pendingMessages.get(id);
+  
+  if (pending) {
+    try {
+      const customPrompt = req.body.prompt;
+      // route the new prompt through the same logic as the original context
+      const newReply = await generateReply(customPrompt, pending.contextText);
+      pending.replyText = newReply;
+      res.json({ success: true, replyText: newReply });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to regenerate' });
+    }
+  } else {
+    res.status(404).json({ error: 'Not found' });
+  }
+});
+
+// Chat GPT helper for the UI Side-Panel
+app.post('/api/chat', async (req, res) => {
+  try {
+    const customPrompt = req.body.prompt;
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are an assistant helping draft a quick WhatsApp message to other students. The output should be very short, casual but professional, and sound like a natural text message. Do not include quotes around the text." },
+        { role: "user", content: customPrompt }
+      ]
+    });
+    res.json({ reply: response.choices[0].message.content });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: 'Chat failed' });
+  }
+});
+
 app.listen(3000, '0.0.0.0', () => {
   console.log("🌐 Approval UI available on port 3000 (http://localhost:3000)");
 });
@@ -154,8 +193,16 @@ client.on("message_create", async (msg) => {
     const chat = await msg.getChat();
     const recentMessages = await chat.fetchMessages({ limit: 10 });
 
+    let contextText = "--- Chat History (Last 10 messages) ---\n";
+    for (const m of recentMessages) {
+      const sender = m.fromMe ? "Pranav (Me)" : (m.author || m.from);
+      if (m.body.includes("@bot") || m.body.includes("/reply")) continue;
+      contextText += `[${sender}]: ${m.body}\n`;
+    }
+    contextText += "---------------------------------------\n";
+
     // 7. Generate response
-    const reply = await generateReply(cleaned, recentMessages);
+    const reply = await generateReply(cleaned, contextText);
 
     // 8. Queue for approval instead of sending directly
     const id = Date.now().toString();
@@ -164,6 +211,7 @@ client.on("message_create", async (msg) => {
       msg: msg,
       replyText: reply,
       originalText: msg.body,
+      contextText: contextText,
       to: msg.fromMe ? "Myself" : (chat.name || msg.from)
     });
     console.log(`[DEBUG] Message queued for approval (ID: ${id}). Go to UI to approve.`);
@@ -177,29 +225,27 @@ client.on("message_create", async (msg) => {
 });
 
 // ===== AI ROUTING & REPLIES =====
-async function generateReply(input, recentMessages) {
-  let contextText = "--- Chat History (Last 10 messages) ---\n";
-  for (const m of recentMessages) {
-    const sender = m.fromMe ? "Pranav (Me)" : (m.author || m.from);
-    if (m.body.includes("@bot") || m.body.includes("/reply")) continue;
-    contextText += `[${sender}]: ${m.body}\n`;
-  }
-  contextText += "---------------------------------------\n";
-  
+async function generateReply(input, contextText) {
   const finalInput = input || "Provide a natural follow-up or comment on the conversation above.";
   
+  const classifierSystemPrompt = `You are a classifier that decides how to route a user query.
+Return ONLY one of the following labels:
+- "assistant" -> if the query is about TAMU billing, student org finance, EasyTransfer, or needs external knowledge/files/web search
+- "simple" -> if it is casual conversation or general knowledge`;
+  const classifierUserPrompt = `User message:\n"${finalInput}"`;
+
   console.log("\n[DEBUG] === CLASSIFYING MESSAGE ROUTE ===");
+  console.log("[System Prompt]:\n" + classifierSystemPrompt);
+  console.log("[User Prompt]:\n" + classifierUserPrompt);
+
   const route = await openai.chat.completions.create({
     model: "gpt-4o-mini", // fast & cheap for routing
     messages: [{
       role: "system",
-      content: `You are a classifier that decides how to route a user query.
-Return ONLY one of the following labels:
-- "assistant" -> if the query is about TAMU billing, student org finance, EasyTransfer, or needs external knowledge/files/web search
-- "simple" -> if it is casual conversation or general knowledge`
+      content: classifierSystemPrompt
     }, {
       role: "user",
-      content: `User message:\n"${finalInput}"`
+      content: classifierUserPrompt
     }],
     temperature: 0,
   });
@@ -217,14 +263,20 @@ Return ONLY one of the following labels:
 async function callSimpleModel(input, contextText) {
   console.log("[DEBUG] Routing to -> Simple Model");
   const fullContext = contextText + `\nYour prompt: ${input}`;
+  
+  const systemPrompt = "You are Pranav replying in a WhatsApp group chat with other students. Keep your response very short, casual, but professional (like a quick text). Do not write long paragraphs or over-explain. Read the provided chat history to understand the context. If the question has already been completely answered by someone else in the history, just acknowledge it briefly or add a small new piece of relevant information instead of repeating the same answer. Give a genuine, direct answer to the prompt. If your name ('Pranav') is mentioned, prioritize responding to that specific point. Avoid overly enthusiastic, cheesy, or typical 'AI' phrases. Keep it natural and concise. IMPORTANT: Do not include names, sender tags, or brackets at the beginning of your response. Just write the message text.";
+
+  console.log("\n[DEBUG] === SIMPLE MODEL CALL ===");
+  console.log("[System Prompt]:\n" + systemPrompt);
+  console.log("[User Prompt/Context]:\n" + fullContext);
+  console.log("=================================\n");
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
-        content:
-          "You are Pranav replying in a WhatsApp group chat. Read the provided chat history to understand the context and give a genuine, direct answer to the prompt. If your name ('Pranav') is mentioned in the prompt or recent messages, prioritize responding to that specific point over the rest of the general chatter. Your tone should be a balanced mix of professional, lighthearted, and sincere. Avoid overly enthusiastic, cheesy, or typical 'AI' phrases (like using too many emojis, or asking forced follow-up questions). Keep it natural, concise, and conversational. IMPORTANT: Do not include names, sender tags, or brackets at the beginning of your response. Just write the message text.",
+        content: systemPrompt,
       },
       {
         role: "user",
@@ -248,10 +300,16 @@ async function callAssistant(input, contextText) {
   try {
     const thread = await openai.beta.threads.create();
     
+    const assistantUserPrompt = `${contextText}\n\nUser prompt: ${input}\n\n(Important Instructions: You are Pranav replying to other students in a WhatsApp chat. Keep your response very short, casual, and professional like a quick text message. No long paragraphs. If the question has already been completely answered by someone else in the history, just acknowledge it briefly or add a small new piece of relevant information instead of repeating the same answer. If your name 'Pranav' is mentioned in the prompt or recent messages, prioritize answering that specific point.)`;
+    
+    console.log("\n[DEBUG] === ASSISTANT API CALL ===");
+    console.log("[User Prompt/Context sent to Assistant]:\n" + assistantUserPrompt);
+    console.log("==================================\n");
+
     // Send context + prompt to the assistant thread
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
-      content: `${contextText}\n\nUser prompt: ${input}\n\n(Important Instruction: You are Pranav. If your name 'Pranav' is mentioned in the prompt or recent messages, prioritize answering that specific point over responding to the rest of the general chat history.)`
+      content: assistantUserPrompt
     });
 
     // Create a run and poll until it finishes (handles files and web search automatically!)
