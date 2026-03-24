@@ -18,7 +18,7 @@ if (fs.existsSync(remoteAuthPath)) {
   }
 }
 
-const { Client, RemoteAuth } = require("whatsapp-web.js");
+const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const OpenAI = require("openai");
 const mongoose = require("mongoose");
@@ -216,6 +216,10 @@ client.on("authenticated", () => {
 // ===== REMOTE AUTH HANDLING =====
 client.on("remote_session_saved", () => {
   console.log("☁️ Successfully saved remote session to MongoDB!");
+});
+
+client.on("loading_screen", (percent, message) => {
+  console.log(`⌛ Loading... ${percent}% - ${message}`);
 });
 
 // ===== CONNECTION STATE & DISCONNECT HANDLING =====
