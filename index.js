@@ -147,6 +147,7 @@ app.post('/api/chat', async (req, res) => {
 
 // QR Code UI for easy scanning
 app.get('/qr', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   if (currentQR) {
     res.send(`
       <html>
@@ -160,7 +161,19 @@ app.get('/qr', (req, res) => {
       </html>
     `);
   } else {
-    res.send("<h2 style='text-align: center; margin-top: 50px; font-family: sans-serif;'>✅ Bot is connected or loading...</h2>");
+    res.send(`
+      <html>
+        <head>
+          <meta http-equiv="refresh" content="3">
+        </head>
+        <body style="font-family: sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#f0f0f0;">
+          <div style="text-align: center;">
+            <h2 style='text-align: center; font-family: sans-serif;'>⏳ Bot is connecting or loading...</h2>
+            <p style='color: #666; font-family: sans-serif;'>Please wait. This page will auto-refresh automatically until the QR code is ready.</p>
+          </div>
+        </body>
+      </html>
+    `);
   }
 });
 
