@@ -208,6 +208,16 @@ client.on("ready", () => {
   console.log("✅ Bot is ready!");
 });
 
+// ===== AUTHENTICATION =====
+client.on("authenticated", () => {
+  console.log("🔒 Authentication successful! Syncing session payload to Mongo...");
+});
+
+// ===== REMOTE AUTH HANDLING =====
+client.on("remote_session_saved", () => {
+  console.log("☁️ Successfully saved remote session to MongoDB!");
+});
+
 // ===== CONNECTION STATE & DISCONNECT HANDLING =====
 client.on("change_state", (state) => {
   console.log("🔄 Connection state changed to:", state);
