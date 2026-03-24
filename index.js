@@ -432,7 +432,17 @@ if (!process.env.MONGODB_URI) {
   process.exit(1);
 }
 
-mongoose.connect(process.env.MONGODB_URI).then(() => {
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+});
+
+mongoose.connect(process.env.MONGODB_URI, { 
+  family: 4 // Force IPv4 to prevent Docker DNS bugs with MongoDB Atlas
+}).then(() => {
   console.log("✅ Connected to MongoDB!");
   store = new CustomMongoStore({ mongoose: mongoose });
   client = new Client({
@@ -440,8 +450,9 @@ mongoose.connect(process.env.MONGODB_URI).then(() => {
       backupSyncIntervalMs: 300000
     }),
     puppeteer: {
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote'],
-      headless: true
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--single-process', '--disable-gpu'],
+      headless: 'new', // This fixes the timeout issues on newer chrome versions
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Automatically uses Docker's built-in Chrome if available
     }
   });
   
@@ -452,7 +463,9 @@ mongoose.connect(process.env.MONGODB_URI).then(() => {
   fs.mkdirSync(sessionPath, { recursive: true });
 
   setupClient();
-  client.initialize();
+  client.initialize().catch(err => {
+    console.error("❌ Puppeteer Initialization Error:", err);
+  });
 }).catch(err => {
   console.error("❌ MongoDB connection error:", err);
 });
