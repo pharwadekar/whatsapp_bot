@@ -186,6 +186,14 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Approval UI available on port ${PORT}, if local on http://localhost:${PORT}`);
 });
 
+// ===== PREVENT RENDER FROM SLEEPING =====
+// Render free tier sleeps after 15 minutes of inactivity. 
+// This pings the bot's own UI every 14 minutes to keep it awake!
+const url = `https://whatsapp-bot-entw.onrender.com/api/pending`;
+setInterval(() => {
+  fetch(url).catch(() => {});
+}, 14 * 60 * 1000);
+
 // ===== CONFIG =====
 const GROUP_ID = "39626056171557@lid"; // put your group id here
 const COOLDOWN_MS = 15000; // 15 sec global cooldown
