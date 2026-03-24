@@ -151,11 +151,15 @@ app.get('/qr', (req, res) => {
   if (currentQR) {
     res.send(`
       <html>
+        <head>
+          <meta http-equiv="refresh" content="15">
+        </head>
         <body style="font-family: sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; background:#f0f0f0;">
           <div style="text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">
             <h2>📱 Scan to Connect WhatsApp</h2>
             <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(currentQR)}" alt="QR Code" />
             <p style="color: #666; margin-top: 20px;">Open WhatsApp > Linked Devices > Link a Device</p>
+            <p style="color: #999; font-size: 12px; margin-top: 10px;">(This page auto-refreshes every 15s to keep the QR fresh)</p>
           </div>
         </body>
       </html>
@@ -459,13 +463,27 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.log("✅ Connected to MongoDB!");
   store = new CustomMongoStore({ mongoose: mongoose });
   client = new Client({
-    authStrategy: new RemoteAuth({        clientId: 'bot-session',      store: store,
+    authStrategy: new RemoteAuth({        
+      clientId: 'bot-session',      
+      store: store,
       backupSyncIntervalMs: 300000
     }),
     puppeteer: {
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--single-process', '--disable-gpu'],
-      headless: 'new', // This fixes the timeout issues on newer chrome versions
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Automatically uses Docker's built-in Chrome if available
+      args: process.platform === 'win32' ? 
+        ['--no-sandbox', '--disable-setuid-sandbox'] : // Lean args for Windows local testing
+        [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox', 
+          '--disable-dev-shm-usage', 
+          '--disable-accelerated-2d-canvas', 
+          '--no-first-run', 
+          '--no-zygote', 
+          '--single-process', 
+          '--disable-gpu',
+          '--memory-pressure-off' 
+        ], // Heavy compression args for Render
+      headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
     }
   });
   
