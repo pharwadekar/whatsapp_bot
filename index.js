@@ -285,11 +285,13 @@ client.on("message_create", async (msg) => {
 
     const text = msg.body.trim();
 
-    // 3. ONLY respond if explicitly triggered
+    // 3. ONLY respond if explicitly triggered OR if it's a question
+    // This regex checks for a "?" or common question words even if they forget the "?"
+    const isQuestion = text.includes("?") || /^(what|who|where|when|why|how|is|are|can|could|do|does|will|would)\b/i.test(text);
+    
     const isCommand =
-      text.startsWith("/reply") ||
-      text.toLowerCase().includes("@bot") ||
-      text.toLowerCase().includes("pranav");
+      text.toLowerCase().includes("pranav") ||
+      isQuestion;
 
     if (!isCommand) return;
 
@@ -311,11 +313,8 @@ client.on("message_create", async (msg) => {
       return;
     }
 
-    // 6. Clean input (remove trigger words except "pranav")
-    let cleaned = text
-      .replace("/reply", "")
-      .replace(/@bot/gi, "")
-      .trim();
+    // 6. Clean input
+    let cleaned = text.trim();
 
     console.log("[DEBUG] Fetching recent messages for context...");
     const chat = await msg.getChat();
@@ -324,7 +323,6 @@ client.on("message_create", async (msg) => {
     let contextText = "--- Chat History (Last 10 messages) ---\n";
     for (const m of recentMessages) {
       const sender = m.fromMe ? "Pranav (Me)" : (m.author || m.from);
-      if (m.body.includes("@bot") || m.body.includes("/reply")) continue;
       contextText += `[${sender}]: ${m.body}\n`;
     }
     contextText += "---------------------------------------\n";

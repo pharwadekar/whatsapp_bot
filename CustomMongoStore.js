@@ -30,11 +30,25 @@ class CustomMongoStore {
         // RemoteAuth creates the zip at options.session + '.zip'
         const zipPath = `${options.session}.zip`;
 
+        if (fs.existsSync(zipPath)) {
+            const stats = fs.statSync(zipPath);
+            console.log(`\n[MongoStore Log] 📦 Preparing to upload session zip to MongoDB... Size: ${stats.size} bytes`);
+            if (stats.size < 1000) {
+                console.log(`[MongoStore Log] ⚠️ WARNING: Zip file is suspiciously small (${stats.size} bytes). Chrome may not have flushed data to disk yet!`);
+            }
+        }
+
         await new Promise((resolve, reject) => {
             fs.createReadStream(zipPath)
                 .pipe(bucket.openUploadStream(`${sessionName}.zip`))
-                .on('error', err => reject(err))
-                .on('close', () => resolve());
+                .on('error', err => {
+                    console.log(`[MongoStore Log] ❌ ERRROR uploading to MongoDB:`, err);
+                    reject(err)
+                })
+                .on('close', () => {
+                    console.log(`[MongoStore Log] ☁️ SERVER UPLOAD 100% COMPLETE. Session safely stored in MongoDB Database.`);
+                    resolve();
+                });
         });
 
         options.bucket = bucket;
