@@ -4,3 +4,4 @@ node_modules/
 .wwebjs_cache/
 .DS_Store
 .cache/
+generated-pdfs/

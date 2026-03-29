@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "auth:local": "node local-auth-bootstrap.js",
+    "auth:upload": "node upload-session.js",
+    "auth:check": "node check-mongo.js"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +18,7 @@
     "express": "^5.2.1",
     "mongoose": "^9.3.1",
     "openai": "^6.32.0",
+    "pdfkit": "^0.18.0",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.34.6",
     "wwebjs-mongo": "^1.1.0"

@@ -9,6 +9,9 @@
     h2 { margin-top: 0; text-align: center;}
     .card { background: white; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
     .meta { font-size: 12px; color: #666; margin-bottom: 10px; }
+    .type-badge { display:inline-block; margin-left:6px; font-size:11px; background:#f1f3f5; color:#333; padding:2px 6px; border-radius:999px; }
+    .status-badge { display:inline-block; margin-left:6px; font-size:11px; background:#eef6ff; color:#0b5394; padding:2px 6px; border-radius:999px; }
+    .status-error { color:#a94442; font-size:12px; margin-bottom:8px; }
     .original { background: #e9ecef; padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 14px;}
     textarea { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; height: 100px; resize: vertical; margin-bottom: 10px; font-family: inherit;}
     .composer { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -16,6 +19,7 @@
     .composer button.regen { background: #007bff; color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-weight: bold; }
     .actions { display: flex; gap: 10px; justify-content: flex-end; }
     button.btn-act { padding: 10px 15px; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; flex: 1;}
+    button.preview { background: #6c757d; color: white; }
     .approve { background: #25d366; color: white; }
     .reject { background: #ff4b4b; color: white; }
     .empty { text-align: center; color: #888; margin-top: 50px;}
@@ -30,7 +34,17 @@
   </style>
 </head>
 <body>
-  <h2>Bot Approval Dashboard</h2>
+    <h2>Bot Approval Dashboard</h2>
+
+  <div class="card" style="border-top: 4px solid #ff9800; background: #fffdf7;">
+    <h3 style="margin-top:0;">📄 Generate Daily PDF Guide</h3>
+    <select id="topic-select" style="width:100%; padding:8px; margin-bottom: 10px; border-radius: 6px; border:1px solid #ccc;">
+      <option value="">Loading topics...</option>
+    </select>
+    <button onclick="generatePDF()" id="btn-gen-pdf" style="background:#ff9800; color:white; border:none; padding:10px 15px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%;">
+      Generate & Queue PDF
+    </button>
+  </div>
   <div id="container">Loading...</div>
 
   <div class="chatbot-panel">
@@ -55,11 +69,19 @@
 
       container.innerHTML = '';
       data.forEach(item => {
+        const previewButton = item.previewUrl
+          ? `<button class="btn-act preview" onclick="previewPdf('${item.id}')">Preview PDF</button>`
+          : '';
+        const isBusy = item.status === 'retrying' || item.status === 'sending';
+        const approveLabel = isBusy ? 'Auto-retrying...' : 'Approve / Send';
+        const retryInfo = item.nextRetryInSeconds != null ? ` (next in ${item.nextRetryInSeconds}s)` : '';
+
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
-          <div class="meta">To: ${item.to}</div>
+          <div class="meta">To: ${item.to}<span class="type-badge">${item.kind || 'text'}</span><span class="status-badge">${item.status || 'pending'}${retryInfo}</span></div>
           <div class="original"><strong>Context/Trigger:</strong><br>${item.originalText}</div>
+          ${item.lastError ? `<div class="status-error">Last error: ${item.lastError}</div>` : ''}
           
           <div class="composer">
             <input type="text" id="prompt-${item.id}" placeholder="Ask AI to refine (e.g. 'make it funnier', or write a new custom prompt)" />
@@ -68,12 +90,17 @@
 
           <textarea id="reply-${item.id}">${item.replyText}</textarea>
           <div class="actions">
+            ${previewButton}
             <button class="btn-act reject" onclick="reject('${item.id}')">Reject</button>
-            <button class="btn-act approve" onclick="approve('${item.id}')">Approve / Send</button>
+            <button class="btn-act approve" onclick="approve('${item.id}')" ${isBusy ? 'disabled' : ''}>${approveLabel}</button>
           </div>
         `;
         container.appendChild(card);
       });
+    }
+
+    function previewPdf(id) {
+      window.open(`/api/pdf-preview/${id}`, '_blank', 'noopener');
     }
 
     async function regenerate(id) {
@@ -109,13 +136,22 @@
 
     async function approve(id) {
       const text = document.getElementById('reply-' + id).value;
-      const btn = document.querySelector(`button.approve`);
-      if(btn) btn.innerText = "Sending...";
-      await fetch('/api/approve/' + id, {
+      const btn = document.querySelector(`button.approve[onclick="approve('${id}')"]`);
+      if(btn) {
+        btn.innerText = "Sending...";
+        btn.disabled = true;
+      }
+      const res = await fetch('/api/approve/' + id, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
       });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 202 || data.retrying) {
+        alert(data.message || 'Send is queued for auto-retry. No extra click needed.');
+      } else if (!res.ok) {
+        alert(data.error || 'Failed to send.');
+      }
       loadPending();
     }
 
@@ -154,7 +190,66 @@
       btn.disabled = false;
     }
 
+    async function loadTopics() {
+      const select = document.getElementById('topic-select');
+      try {
+        const res = await fetch('/api/topics');
+        const topics = await res.json();
+
+        if (!Array.isArray(topics) || topics.length === 0) {
+          select.innerHTML = '<option value="">No topics found</option>';
+          return;
+        }
+
+        select.innerHTML = '<option value="">Select a topic...</option>' +
+          topics.map(topic => `<option value="${topic}">${stripMonthPrefix(topic)}</option>`).join('');
+      } catch (e) {
+        select.innerHTML = '<option value="">Failed to load topics</option>';
+      }
+    }
+
+    function stripMonthPrefix(topic) {
+      return topic.replace(/^\[Month\s*\d+\]\s*/i, '').trim();
+    }
+
+    async function generatePDF() {
+      const select = document.getElementById('topic-select');
+      const topic = select.value;
+      if (!topic) return alert('Please select a topic first.');
+
+      const btn = document.getElementById('btn-gen-pdf');
+      const oldLabel = btn.innerText;
+      btn.innerText = 'Generating...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/generate-pdf', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic })
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to generate PDF');
+        }
+
+        if (data.previewUrl) {
+          window.open(data.previewUrl, '_blank', 'noopener');
+        }
+
+        alert('PDF created and queued. Approve it below to send.');
+        loadPending();
+      } catch (e) {
+        alert('Could not generate PDF right now. Please try again.');
+      } finally {
+        btn.innerText = oldLabel;
+        btn.disabled = false;
+      }
+    }
+
     loadPending();
+    loadTopics();
     setInterval(loadPending, 5000); // Reload every 5 seconds
   </script>
 </body>

@@ -18,7 +18,7 @@ if (fs.existsSync(remoteAuthPath)) {
   }
 }
 
-const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
+const { Client, RemoteAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const OpenAI = require("openai");
 const mongoose = require("mongoose");
@@ -60,18 +60,335 @@ app.use((req, res, next) => {
 
 app.use(express.static('public'));
 
+const PDFDocument = require('pdfkit');
+
+const GROUP_ID = "117991492559076@lid";
 const pendingMessages = new Map();
+const autoRetryTimers = new Map();
 let currentQR = "";
+let waClientReady = false;
+let initInProgress = false;
+const AUTO_RETRY_MAX_ATTEMPTS = 6;
+const AUTO_RETRY_BASE_DELAY_MS = 5000;
+
+function isTransientSendError(err) {
+  const msg = err?.message || '';
+  return (
+    msg.includes('Attempted to use detached Frame') ||
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('Protocol error')
+  );
+}
+
+function isTransientInitError(err) {
+  const msg = (err?.message || '') + (err?.code || '');
+  return (
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('Attempted to use detached Frame') ||
+    msg.includes('Target closed') ||
+    msg.includes('Protocol error') ||
+    msg.includes('already running') ||
+    msg.includes('ENOENT') ||
+    msg.includes('EBUSY') ||
+    msg.includes('LOCKED') ||
+    msg.includes('EACCES') ||
+    msg.includes('file lock')
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendMessageWithRetry(chatId, content, options = {}, maxRetries = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      if (!client || !waClientReady) {
+        throw new Error('WhatsApp client is reconnecting.');
+      }
+      return await client.sendMessage(chatId, content, options);
+    } catch (err) {
+      lastErr = err;
+      const canRetry = isTransientSendError(err) || (err?.message || '').includes('reconnecting');
+      if (!canRetry || attempt === maxRetries) {
+        throw err;
+      }
+      console.warn(`[WARN] sendMessage retry ${attempt}/${maxRetries} after transient failure:`, err?.message || err);
+      await sleep(1200 * attempt);
+    }
+  }
+  throw lastErr;
+}
+
+async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
+  if (!client) return;
+  if (initInProgress) {
+    console.log(`[INFO] initializeClientWithRetry skipped (${source}) because init is already in progress.`);
+    return;
+  }
+
+  initInProgress = true;
+  waClientReady = false;
+  let lastErr;
+
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`[INFO] Initializing WhatsApp client (${source}) attempt ${attempt}/${maxAttempts}...`);
+        await client.initialize();
+        return;
+      } catch (err) {
+        lastErr = err;
+        const transient = isTransientInitError(err);
+        console.error(`[WARN] Client initialize failed (attempt ${attempt}/${maxAttempts}):`, err?.message || err);
+
+        if (!transient || attempt === maxAttempts) {
+          throw err;
+        }
+
+        // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 64s
+        const delayMs = Math.pow(2, attempt) * 1000;
+        console.log(`[INFO] Retrying in ${delayMs}ms...`);
+        await sleep(delayMs);
+      }
+    }
+  } finally {
+    initInProgress = false;
+  }
+
+  throw lastErr;
+}
+
+function clearAutoRetryTimer(id) {
+  const timer = autoRetryTimers.get(id);
+  if (timer) {
+    clearTimeout(timer);
+    autoRetryTimers.delete(id);
+  }
+}
+
+function getNextRetryDelayMs(attemptNumber) {
+  return Math.min(AUTO_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, attemptNumber - 1)), 60000);
+}
+
+async function sendPendingItem(pending, textToReply) {
+  if (pending.mediaPath) {
+    if (!client || !waClientReady) {
+      throw new Error('WhatsApp client is reconnecting.');
+    }
+
+    if (!fs.existsSync(pending.mediaPath)) {
+      throw new Error('PDF file not found on disk. Please regenerate PDF.');
+    }
+
+    const fileName = path.basename(pending.mediaPath);
+    const pdfBase64 = fs.readFileSync(pending.mediaPath, { encoding: 'base64' });
+    const media = new MessageMedia('application/pdf', pdfBase64, fileName);
+
+    const mediaMessage = await sendMessageWithRetry(pending.targetGroupId, media, {
+      sendMediaAsDocument: true
+    });
+
+    const textMessage = await sendMessageWithRetry(pending.targetGroupId, textToReply);
+
+    console.log('[DEBUG] PDF queued approval sent successfully', {
+      targetGroupId: pending.targetGroupId,
+      mediaMessageId: mediaMessage?.id?._serialized,
+      mediaType: mediaMessage?.type,
+      mediaHasMedia: mediaMessage?.hasMedia,
+      textMessageId: textMessage?.id?._serialized,
+      textBody: textMessage?.body
+    });
+
+    setTimeout(() => fs.unlink(pending.mediaPath, () => {}), 30000);
+    return;
+  }
+
+  await pending.msg.reply(textToReply);
+}
+
+async function processApprovedSend(id) {
+  const pending = pendingMessages.get(id);
+  if (!pending) return { ok: false, code: 404, error: 'Not found' };
+
+  if ((pending.kind === 'pdf' || pending.mediaPath) && !pending.mediaPath) {
+    pending.status = 'failed';
+    pending.lastError = 'PDF queue item missing file path. Please regenerate PDF.';
+    return { ok: false, code: 500, error: pending.lastError };
+  }
+
+  if (pending.status === 'sending') {
+    return { ok: false, code: 202, error: 'Send already in progress.' };
+  }
+
+  pending.status = 'sending';
+  pending.lastError = null;
+  pending.nextRetryAt = null;
+  pending.sendAttempts = (pending.sendAttempts || 0) + 1;
+
+  try {
+    const textToReply = pending.approvedText || pending.replyText;
+    await sendPendingItem(pending, textToReply);
+    clearAutoRetryTimer(id);
+    pendingMessages.delete(id);
+    return { ok: true, code: 200 };
+  } catch (err) {
+    const isTransient = isTransientSendError(err) || (err?.message || '').includes('reconnecting');
+    pending.lastError = err?.message || 'Failed to send';
+
+    if (!isTransient) {
+      pending.status = 'failed';
+      return { ok: false, code: 500, error: pending.lastError };
+    }
+
+    if ((pending.sendAttempts || 0) >= (pending.maxAttempts || AUTO_RETRY_MAX_ATTEMPTS)) {
+      pending.status = 'failed';
+      return { ok: false, code: 500, error: `Auto-retry exhausted: ${pending.lastError}` };
+    }
+
+    pending.status = 'retrying';
+    const delayMs = getNextRetryDelayMs(pending.sendAttempts || 1);
+    pending.nextRetryAt = Date.now() + delayMs;
+
+    clearAutoRetryTimer(id);
+    const timer = setTimeout(async () => {
+      autoRetryTimers.delete(id);
+      const latest = pendingMessages.get(id);
+      if (!latest) return;
+      if (latest.status === 'retrying' || latest.status === 'sending') {
+        await processApprovedSend(id);
+      }
+    }, delayMs);
+    autoRetryTimers.set(id, timer);
+
+    return { ok: false, code: 202, error: `Queued for auto-retry: ${pending.lastError}` };
+  }
+}
+
+function stripMonthPrefix(topic = "") {
+  return topic.replace(/^\[[^\]]+\]\s*/i, '').trim();
+}
+
+
+// Get topics lists
+app.get('/api/topics', (req, res) => {
+  try {
+    const topicsPath = path.join(__dirname, 'topics.json');
+    const topics = JSON.parse(fs.readFileSync(topicsPath, 'utf8'));
+    res.json(topics);
+  } catch(e) {
+    res.json([]);
+  }
+});
+
+// Generate PDF for a topic
+app.post('/api/generate-pdf', async (req, res) => {
+  try {
+    const topic = req.body.topic;
+    if(!topic) return res.status(400).json({ error: 'No topic provided' });
+    const cleanTopic = stripMonthPrefix(topic);
+
+    console.log('[DEBUG] Generating PDF for topic:', cleanTopic);
+    
+    // 1. Generate text using AI
+    const systemPrompt = "You are an advisor for international students at Texas A&M. Write a comprehensive 1-page guide on the given topic. Use sections, bullet points, and be very informative but clear. Do not use markdown (like asterisks for bold) as plain text will be compiled directly to PDF, use plain text structure.";
+    
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Please write a guide about: ${cleanTopic}` }
+      ],
+      max_tokens: 800,
+    });
+    
+    const guideText = response.choices[0].message.content.trim();
+    
+    // 2. Generate PDF using PDFKit
+    const doc = new PDFDocument({ margin: 50 });
+    const outputDir = path.join(__dirname, 'generated-pdfs');
+    fs.mkdirSync(outputDir, { recursive: true });
+    const fileName = `guide-${Date.now()}.pdf`;
+    const filePath = path.join(outputDir, fileName);
+    
+    const writeStream = fs.createWriteStream(filePath);
+    doc.pipe(writeStream);
+    
+    doc.fontSize(20).text(cleanTopic, { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text(guideText, { align: 'left', lineGap: 4 });
+    doc.end();
+    
+    // Wait for the file to be written
+    await new Promise((resolve) => writeStream.on('finish', resolve));
+
+    // 3. Queue the message
+    const id = Date.now().toString();
+    pendingMessages.set(id, {
+      id,
+      kind: 'pdf',
+      status: 'pending',
+      sendAttempts: 0,
+      maxAttempts: AUTO_RETRY_MAX_ATTEMPTS,
+      approvedText: null,
+      lastError: null,
+      nextRetryAt: null,
+      msg: null,
+      replyText: `Hello everyone! Here is a guide on: ${cleanTopic}`,
+      originalText: `Daily PDF Generation: ${cleanTopic}`,
+      contextText: '',
+      to: 'Main Group',
+      mediaPath: filePath,
+      targetGroupId: GROUP_ID
+    });
+    
+    res.json({
+      success: true,
+      message: 'PDF generated and queued for approval!',
+      id,
+      previewUrl: `/api/pdf-preview/${id}`
+    });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to generate PDF' });
+  }
+});
 
 // Get the list of pending messages
 app.get('/api/pending', (req, res) => {
   const items = Array.from(pendingMessages.values()).map(p => ({
     id: p.id,
+    kind: p.kind || 'text',
+    status: p.status || 'pending',
+    sendAttempts: p.sendAttempts || 0,
+    maxAttempts: p.maxAttempts || AUTO_RETRY_MAX_ATTEMPTS,
+    lastError: p.lastError || null,
+    nextRetryInSeconds: p.nextRetryAt ? Math.max(0, Math.ceil((p.nextRetryAt - Date.now()) / 1000)) : null,
     originalText: p.originalText,
     replyText: p.replyText,
-    to: p.to
+    to: p.to,
+    previewUrl: p.mediaPath ? `/api/pdf-preview/${p.id}` : null
   }));
   res.json(items.reverse()); // newest first
+});
+
+// Preview a queued PDF before approving/sending
+app.get('/api/pdf-preview/:id', (req, res) => {
+  const id = req.params.id;
+  const pending = pendingMessages.get(id);
+
+  if (!pending || !pending.mediaPath) {
+    return res.status(404).send('Preview not found');
+  }
+
+  const resolved = path.resolve(pending.mediaPath);
+  if (!fs.existsSync(resolved)) {
+    return res.status(404).send('File not found');
+  }
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.sendFile(resolved);
 });
 
 // Approve a message
@@ -81,11 +398,23 @@ app.post('/api/approve/:id', async (req, res) => {
   
   if (pending) {
     try {
-      // Send the approved/edited text
-      const textToReply = req.body.text || pending.replyText;
-      await pending.msg.reply(textToReply);
-      pendingMessages.delete(id);
-      res.json({ success: true });
+      pending.approvedText = req.body.text || pending.replyText;
+      const result = await processApprovedSend(id);
+
+      if (result.ok) {
+        return res.json({ success: true, sent: true });
+      }
+
+      if (result.code === 202) {
+        return res.status(202).json({
+          success: true,
+          sent: false,
+          retrying: true,
+          message: result.error
+        });
+      }
+
+      return res.status(result.code || 500).json({ error: result.error || 'Failed to send' });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Failed to send' });
@@ -98,7 +427,12 @@ app.post('/api/approve/:id', async (req, res) => {
 // Reject a message
 app.post('/api/reject/:id', (req, res) => {
   const id = req.params.id;
-  if(pendingMessages.has(id)) {
+  const pending = pendingMessages.get(id);
+  if(pending) {
+    clearAutoRetryTimer(id);
+    if (pending.mediaPath) {
+      fs.unlink(pending.mediaPath, () => {});
+    }
     pendingMessages.delete(id);
     res.json({ success: true });
   } else {
@@ -195,7 +529,7 @@ setInterval(() => {
 }, 14 * 60 * 1000);
 
 // ===== CONFIG =====
-const GROUP_ID = "39626056171557@lid"; // put your group id here
+
 const COOLDOWN_MS = 15000; // 15 sec global cooldown
 const USER_COOLDOWN_MS = 20000; // per-user cooldown
 
@@ -213,6 +547,7 @@ client.on("qr", (qr) => {
 // ===== READY =====
 client.on("ready", () => {
   currentQR = "";
+  waClientReady = true;
   console.log("✅ Bot is ready!");
 });
 
@@ -238,20 +573,17 @@ client.on("change_state", (state) => {
 client.on("disconnected", async (reason) => {
   console.log("❌ Bot was disconnected! Reason:", reason);
   currentQR = "";
-  
-  // Auto-heal: If you logout from your phone, or if the session corrupts,
-  // delete the remote session data in MongoDB!
-  if (store) {
-    store.delete({ session: 'RemoteAuth' }).then(() => {
-      console.log("🗑️ Cleared old/corrupted auth session data from MongoDB.");
-    }).catch(() => {});
-  }
+  waClientReady = false;
+
+  // IMPORTANT: do NOT auto-delete remote auth on normal disconnects.
+  // Transient disconnects are common and deleting session forces QR re-link.
+  console.log("ℹ️ Keeping MongoDB session data intact on disconnect.");
 
   console.log("⚠️ Attempting to restart the client in 5 seconds...");
   setTimeout(async () => {
     try {
       await client.destroy();
-      client.initialize();
+      await initializeClientWithRetry('disconnected-restart');
     } catch (err) {
       console.error("Error restarting client:", err);
     }
@@ -262,10 +594,17 @@ client.on("disconnected", async (reason) => {
 client.on("auth_failure", (msg) => {
   console.error("❌ Authentication failure (corrupted login data)!", msg);
   currentQR = "";
-  if (store) {
-    store.delete({ session: 'RemoteAuth' }).then(() => {
-      console.log("🗑️ Cleared corrupted auth session data from MongoDB. Restarting will generate a new QR.");
-    }).catch(() => {});
+  waClientReady = false;
+
+  // Optional manual cleanup only when explicitly requested via env var.
+  if (process.env.CLEAR_SESSION_ON_AUTH_FAILURE === 'true' && store) {
+    store.delete({ session: 'RemoteAuth-bot-session' }).then(() => {
+      console.log("🗑️ Cleared remote auth session from MongoDB due to CLEAR_SESSION_ON_AUTH_FAILURE=true");
+    }).catch((err) => {
+      console.warn("[WARN] Failed clearing remote auth session:", err?.message || err);
+    });
+  } else {
+    console.log("ℹ️ Session retained. Set CLEAR_SESSION_ON_AUTH_FAILURE=true only if you want to force fresh QR.");
   }
 });
 
@@ -273,6 +612,11 @@ client.on("auth_failure", (msg) => {
 client.on("message_create", async (msg) => {
   try {
     console.log(`[DEBUG] Received message from: ${msg.from} | body: "${msg.body}" | fromMe: ${msg.fromMe}`);
+
+    // Never react to the bot's own outgoing messages (prevents self-looping)
+    if (msg.fromMe) {
+      return;
+    }
 
     // Allow personal chats OR messages sent by you to a personal chat OR specific group
     const isPersonal = msg.from.includes("@c.us") || msg.to.includes("@c.us");
@@ -283,7 +627,12 @@ client.on("message_create", async (msg) => {
       return;
     }
 
-    const text = msg.body.trim();
+    const text = (msg.body || '').trim();
+
+    // Ignore non-text/media-only events
+    if (!text) {
+      return;
+    }
 
     // 3. ONLY respond if explicitly triggered OR if it's a question
     // This regex checks for a "?" or common question words even if they forget the "?"
@@ -334,6 +683,13 @@ client.on("message_create", async (msg) => {
     const id = Date.now().toString();
     pendingMessages.set(id, {
       id,
+      kind: 'text',
+      status: 'pending',
+      sendAttempts: 0,
+      maxAttempts: AUTO_RETRY_MAX_ATTEMPTS,
+      approvedText: null,
+      lastError: null,
+      nextRetryAt: null,
       msg: msg,
       replyText: reply,
       originalText: msg.body,
@@ -486,7 +842,7 @@ mongoose.connect(process.env.MONGODB_URI, {
     authStrategy: new RemoteAuth({        
       clientId: 'bot-session',      
       store: store,
-      backupSyncIntervalMs: 300000
+      backupSyncIntervalMs: 900000 // Only zip/backup every 15 minutes to save memory
     }),
     puppeteer: {
       args: process.platform === 'win32' ? 
@@ -514,7 +870,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   fs.mkdirSync(sessionPath, { recursive: true });
 
   setupClient();
-  client.initialize().catch(err => {
+  initializeClientWithRetry('initial-startup').catch(err => {
     console.error("❌ Puppeteer Initialization Error:", err);
   });
 }).catch(err => {

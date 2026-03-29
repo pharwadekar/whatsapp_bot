@@ -1,0 +1,8 @@
+node_modules
+.env
+.git
+.wwebjs_auth
+.wwebjs_cache
+.cache
+check-mongo.js
+clean-mongo.js
