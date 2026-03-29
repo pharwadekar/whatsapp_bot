@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node --max-old-space-size=256 index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "auth:local": "node local-auth-bootstrap.js",
     "auth:upload": "node upload-session.js",

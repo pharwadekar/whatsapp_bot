@@ -2,19 +2,31 @@ require("dotenv").config();
 const fs = require('fs');
 const path = require('path');
 
-// --- PATCH WHATSAPP-WEB.JS BUGS AUTOMATICALLY ---
+// --- PATCH WHATSAPP-WEB.JS BUGS & MEMORY LEAKS AUTOMATICALLY ---
 // whatsapp-web.js crashes with an ENOENT error on RemoteAuth because it tries
-// to read a 'Default' folder that doesn't always exist. This patches the library automatically!
+// to read a 'Default' folder that doesn't always exist.
+// Additionally, unzipper uses too much memory extracting large sessions.
 const remoteAuthPath = path.join(__dirname, 'node_modules', 'whatsapp-web.js', 'src', 'authStrategies', 'RemoteAuth.js');
 if (fs.existsSync(remoteAuthPath)) {
   let content = fs.readFileSync(remoteAuthPath, 'utf8');
+  let patched = false;
+  
   if (content.includes('const sessionFiles = await fs.promises.readdir(dir);')) {
     content = content.replace(
       'const sessionFiles = await fs.promises.readdir(dir);',
       'const sessionFiles = await fs.promises.readdir(dir).catch(() => []);'
     );
+    patched = true;
+  }
+  
+  if (content.includes('concurrency: 10')) {
+    content = content.replace('concurrency: 10', 'concurrency: 1');
+    patched = true;
+  }
+  
+  if (patched) {
     fs.writeFileSync(remoteAuthPath, content);
-    console.log('[DEBUG] Patched RemoteAuth.js to prevent ENOENT crash');
+    console.log('[DEBUG] Patched RemoteAuth.js for memory and ENOENT stability');
   }
 }
 
@@ -201,7 +213,11 @@ async function sendPendingItem(pending, textToReply) {
       textBody: textMessage?.body
     });
 
-    setTimeout(() => fs.unlink(pending.mediaPath, () => {}), 30000);
+    setTimeout(() => {
+      if (fs.existsSync(pending.mediaPath)) {
+        fs.unlink(pending.mediaPath, () => {});
+      }
+    }, 15000);
     return;
   }
 
@@ -525,8 +541,13 @@ app.listen(PORT, '0.0.0.0', () => {
 // This pings the bot's own UI every 14 minutes to keep it awake!
 const url = `https://whatsapp-bot-entw.onrender.com/api/pending`;
 setInterval(() => {
-  fetch(url).catch(() => {});
-}, 14 * 60 * 1000);
+  const now = Date.now();
+  for (const [id, p] of pendingMessages.entries()) {
+    if (p.status === 'failed' || p.status === 'sent') {
+      pendingMessages.delete(id);
+    }
+  }
+}, 10 * 60 * 1000);
 
 // ===== CONFIG =====
 
@@ -545,10 +566,24 @@ client.on("qr", (qr) => {
 });
 
 // ===== READY =====
-client.on("ready", () => {
+client.on("ready", async () => {
   currentQR = "";
   waClientReady = true;
   console.log("✅ Bot is ready!");
+
+  try {
+    const pages = await client.pupBrowser.pages();
+    const page = pages[0];
+
+    // Clear browser cache
+    const clientCDP = await page.target().createCDPSession();
+    await clientCDP.send('Network.clearBrowserCache');
+    await clientCDP.send('Network.clearBrowserCookies');
+
+    console.log("🧹 Cleared Chromium cache (reduces session size)");
+  } catch (e) {
+    console.log("⚠️ Cache clear failed:", e.message);
+  }
 });
 
 // ===== AUTHENTICATION =====
@@ -717,9 +752,13 @@ Return ONLY one of the following labels:
 - "simple" -> if it is casual conversation or general knowledge`;
   const classifierUserPrompt = `User message:\n"${finalInput}"`;
 
-  console.log("\n[DEBUG] === CLASSIFYING MESSAGE ROUTE ===");
-  console.log("[System Prompt]:\n" + classifierSystemPrompt);
-  console.log("[User Prompt]:\n" + classifierUserPrompt);
+  const isVerbose = process.env.VERBOSE_LOGGING === 'true';
+
+  if (isVerbose) {
+    console.log("\n[DEBUG] === CLASSIFYING MESSAGE ROUTE ===");
+    console.log("[System Prompt]:\n" + classifierSystemPrompt);
+    console.log("[User Prompt]:\n" + classifierUserPrompt);
+  }
 
   const route = await openai.chat.completions.create({
     model: "gpt-4o-mini", // fast & cheap for routing
@@ -749,10 +788,14 @@ async function callSimpleModel(input, contextText) {
   
   const systemPrompt = "You are Pranav replying in a WhatsApp group chat with other students. Keep your response very short, casual, but professional (like a quick text). Do not write long paragraphs or over-explain. Read the provided chat history to understand the context. If the question has already been completely answered by someone else in the history, just acknowledge it briefly or add a small new piece of relevant information instead of repeating the same answer. Give a genuine, direct answer to the prompt. If your name ('Pranav') is mentioned, prioritize responding to that specific point. Avoid overly enthusiastic, cheesy, or typical 'AI' phrases. Keep it natural and concise. IMPORTANT: Do not include names, sender tags, or brackets at the beginning of your response. Just write the message text.";
 
-  console.log("\n[DEBUG] === SIMPLE MODEL CALL ===");
-  console.log("[System Prompt]:\n" + systemPrompt);
-  console.log("[User Prompt/Context]:\n" + fullContext);
-  console.log("=================================\n");
+  const isVerbose = process.env.VERBOSE_LOGGING === 'true';
+
+  if (isVerbose) {
+    console.log("\n[DEBUG] === SIMPLE MODEL CALL ===");
+    console.log("[System Prompt]:\n" + systemPrompt);
+    console.log("[User Prompt/Context]:\n" + fullContext);
+    console.log("=================================\n");
+  }
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -785,9 +828,13 @@ async function callAssistant(input, contextText) {
     
     const assistantUserPrompt = `${contextText}\n\nUser prompt: ${input}\n\n(Important Instructions: You are Pranav replying to other students in a WhatsApp chat. Keep your response very short, casual, and professional like a quick text message. No long paragraphs. If the question has already been completely answered by someone else in the history, just acknowledge it briefly or add a small new piece of relevant information instead of repeating the same answer. If your name 'Pranav' is mentioned in the prompt or recent messages, prioritize answering that specific point.)`;
     
-    console.log("\n[DEBUG] === ASSISTANT API CALL ===");
-    console.log("[User Prompt/Context sent to Assistant]:\n" + assistantUserPrompt);
-    console.log("==================================\n");
+    const isVerbose = process.env.VERBOSE_LOGGING === 'true';
+
+    if (isVerbose) {
+      console.log("\n[DEBUG] === ASSISTANT API CALL ===");
+      console.log("[User Prompt/Context sent to Assistant]:\n" + assistantUserPrompt);
+      console.log("==================================\n");
+    }
 
     // Send context + prompt to the assistant thread
     await openai.beta.threads.messages.create(thread.id, {
@@ -842,22 +889,29 @@ mongoose.connect(process.env.MONGODB_URI, {
     authStrategy: new RemoteAuth({        
       clientId: 'bot-session',      
       store: store,
-      backupSyncIntervalMs: 900000 // Only zip/backup every 15 minutes to save memory
+      backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
     puppeteer: {
-      args: process.platform === 'win32' ? 
-        ['--no-sandbox', '--disable-setuid-sandbox'] : // Lean args for Windows local testing
-        [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox', 
-          '--disable-dev-shm-usage', 
-          '--disable-accelerated-2d-canvas', 
-          '--no-first-run', 
-          '--no-zygote', 
-          '--single-process', 
-          '--disable-gpu',
-          '--memory-pressure-off' 
-        ], // Heavy compression args for Render
+    args: process.platform === 'win32' ? 
+      ['--no-sandbox', '--disable-setuid-sandbox'] :
+      [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--disable-features=TranslateUI',
+        '--js-flags=--max-old-space-size=128'
+      ], // Heavy compression args for Render
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
     }
