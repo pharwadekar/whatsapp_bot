@@ -942,7 +942,8 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--no-zygote',
         '--disable-gpu',
         '--mute-audio',
-        '--no-default-browser-check'
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled'
       ]
     }
   });
