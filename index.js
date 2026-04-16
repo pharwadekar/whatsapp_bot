@@ -901,7 +901,6 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
         '--disable-gpu',
         '--disable-extensions',
         '--disable-background-networking',
@@ -909,8 +908,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--metrics-recording-only',
         '--mute-audio',
         '--no-default-browser-check',
-        '--disable-features=TranslateUI',
-        '--js-flags=--max-old-space-size=128'
+        '--disable-features=TranslateUI'
       ], // Heavy compression args for Render
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
