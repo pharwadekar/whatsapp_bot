@@ -16,18 +16,16 @@ RUN npm ci
 # Copy the rest of the application
 COPY . .
 
-# IMPORTANT: Ensure the non-root user (pptruser) owns the files so it can write the zip/cache
-RUN chown -R pptruser:pptruser /app
+# IMPORTANT: HF Spaces strictly runs Docker containers as User ID 1000.
+# We must give full permissions to the workspace so it can extract the zip files!
+RUN chmod -R 777 /app
+RUN chown -R 1000:1000 /app
 
-# Switch back to the specialized puppeteer user for safety
-USER pptruser
+# Switch to standard Hugging Face UID 
+USER 1000
 
-# Enforce strict memory limit on Node.js so it doesn't crash the 512MB Render container
-# Node doesn't know it's in a 512MB container and will use RAM infinitely unless capped!
-ENV NODE_OPTIONS="--max-old-space-size=200"
-
-# Expose Render's default port
-EXPOSE 10000
+# Expose Hugging Face Default Port
+EXPOSE 7860
 
 # Start the bot
 CMD ["node", "index.js"]
