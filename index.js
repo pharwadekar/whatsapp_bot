@@ -38,6 +38,7 @@ const { CustomMongoStore } = require("./CustomMongoStore");
 
 let client;
 let store;
+let sessionResetAttempted = false;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -156,6 +157,27 @@ async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
         lastErr = err;
         const transient = isTransientInitError(err);
         console.error(`[WARN] Client initialize failed (attempt ${attempt}/${maxAttempts}):`, err?.message || err);
+
+        const timedOut = (err?.message || '').includes('Timed out after waiting');
+        const shouldResetSession =
+          timedOut &&
+          attempt === maxAttempts &&
+          process.env.RESET_SESSION_ON_INIT_TIMEOUT === 'true' &&
+          !sessionResetAttempted &&
+          store;
+
+        if (shouldResetSession) {
+          sessionResetAttempted = true;
+          try {
+            console.warn('[WARN] Init timed out repeatedly. Clearing RemoteAuth session once to force fresh QR relink...');
+            await store.delete({ session: 'RemoteAuth-bot-session' });
+            console.warn('[WARN] RemoteAuth session cleared. Restarting init flow for QR relink.');
+            await sleep(2000);
+            continue;
+          } catch (resetErr) {
+            console.error('[ERROR] Failed clearing RemoteAuth session after timeout:', resetErr?.message || resetErr);
+          }
+        }
 
         if (!transient || attempt === maxAttempts) {
           throw err;
