@@ -890,8 +890,10 @@ mongoose.connect(process.env.MONGODB_URI, {
       store: store,
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
+    authTimeoutMs: 120000,
     puppeteer: {
-    args: process.platform === 'win32' ? 
+      timeout: 120000, // Increase allowed launch time to 2 minutes
+      args: process.platform === 'win32' ? 
       ['--no-sandbox', '--disable-setuid-sandbox'] :
       [
         '--no-sandbox',
