@@ -891,26 +891,20 @@ mongoose.connect(process.env.MONGODB_URI, {
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
     authTimeoutMs: 120000,
-    puppeteer: {
-      timeout: 120000, // Increase allowed launch time to 2 minutes
-      args: process.platform === 'win32' ? 
-      ['--no-sandbox', '--disable-setuid-sandbox'] :
-      [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '',
-        '',
-        '--disable-sync',
-        '',
-        '--mute-audio',
-        '--no-default-browser-check',
-        '--disable-features=TranslateUI'
-      ], // Heavy compression args for Render
+      webVersionCache: { type: 'none' }, // Bypass WhatsApp caching bugs
+      puppeteer: {
+        timeout: 120000, // Increase allowed launch time to 2 minutes
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu',
+          '--mute-audio',
+          '--no-default-browser-check',
+          '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
     }
