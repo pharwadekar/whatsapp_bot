@@ -903,10 +903,10 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
+        '',
+        '',
         '--disable-sync',
-        '--metrics-recording-only',
+        '',
         '--mute-audio',
         '--no-default-browser-check',
         '--disable-features=TranslateUI'
