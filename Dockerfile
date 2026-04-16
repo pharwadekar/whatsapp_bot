@@ -1,6 +1,6 @@
 # Pin to a known-good Puppeteer image instead of :latest which can
 # silently break when Chrome updates its headless implementation.
-FROM ghcr.io/puppeteer/puppeteer:24.2.0
+FROM ghcr.io/puppeteer/puppeteer:latest
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
