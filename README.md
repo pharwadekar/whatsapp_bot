@@ -1,3 +1,11 @@
+---
+title: Whatsapp Advisor
+emoji: 💬
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 7860
+---
 # WhatsApp AI Bot
 
 This project is a smart WhatsApp assistant that can handle both casual conversations and more complex, knowledge-based queries. It acts as an intelligent routing system that decides when to use a fast, lightweight model for quick replies and when to escalate to a more powerful OpenAI Assistant backed by a custom knowledge base.

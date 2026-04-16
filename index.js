@@ -536,10 +536,9 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Approval UI available on port ${PORT}, if local on http://localhost:${PORT}`);
 });
 
-// ===== PREVENT RENDER FROM SLEEPING =====
-// Render free tier sleeps after 15 minutes of inactivity. 
-// This pings the bot's own UI every 14 minutes to keep it awake!
-const url = `https://whatsapp-bot-entw.onrender.com/api/pending`;
+// ===== PREVENT HF SPACES FROM SLEEPING =====
+// HF Spaces free tier sleeps after 48 hours of inactivity.
+const url = `https://pranavharwadekar-whatsapp-advisor.hf.space/api/pending`;
 setInterval(() => {
   const now = Date.now();
   for (const [id, p] of pendingMessages.entries()) {
