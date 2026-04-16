@@ -4,7 +4,7 @@ const {join} = require('path');
  * @type {import("puppeteer").Configuration}
  */
 module.exports = {
-  // Changes the cache location for Puppeteer to be strictly inside the project folder
-  // so that Render doesn't wipe it out between the build phase and the deploy phase.
-  cacheDirectory: join(__dirname, '.cache', 'puppeteer'),
+  // Use PUPPETEER_CACHE_DIR if set (Docker/HF), otherwise keep cache inside
+  // the project folder (Render deploys wipe external dirs between phases).
+  cacheDirectory: process.env.PUPPETEER_CACHE_DIR || join(__dirname, '.cache', 'puppeteer'),
 };

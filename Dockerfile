@@ -2,8 +2,9 @@
 # silently break when Chrome updates its headless implementation.
 FROM ghcr.io/puppeteer/puppeteer:latest
 
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+# Point Puppeteer at the pre-installed Chrome for Testing cache.
+# Do NOT hardcode an executablePath — let Puppeteer auto-detect from cache.
+ENV PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppeteer
 
 USER root
 WORKDIR /app
