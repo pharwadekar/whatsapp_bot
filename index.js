@@ -933,7 +933,7 @@ mongoose.connect(process.env.MONGODB_URI, {
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
     authTimeoutMs: 120000,  // 2 min — fail fast so retries can clear bad sessions sooner
-    webVersionCache: { type: 'remote' },  // always fetch latest WA Web version from CDN
+    webVersionCache: { type: 'local' },
     puppeteer: {
       timeout: 60000,          // page navigation timeout
       protocolTimeout: 180000, // CDP protocol timeout
