@@ -901,11 +901,11 @@ mongoose.connect(process.env.MONGODB_URI, {
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
     authTimeoutMs: 240000,
-    webVersionCache: { type: 'none' }, // Avoid stale cached web assets in ephemeral runtimes
+    webVersionCache: { type: 'local' },
     puppeteer: {
       timeout: 240000,
       protocolTimeout: 240000,
-      headless: 'new',
+      headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
@@ -916,8 +916,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--no-zygote',
         '--disable-gpu',
         '--mute-audio',
-        '--no-default-browser-check',
-        '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        '--no-default-browser-check'
       ]
     }
   });
