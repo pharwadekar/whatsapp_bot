@@ -171,8 +171,12 @@ async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
           try {
             console.warn('[WARN] Init timed out repeatedly. Clearing RemoteAuth session once to force fresh QR relink...');
             await store.delete({ session: 'RemoteAuth-bot-session' });
-            console.warn('[WARN] RemoteAuth session cleared. Restarting init flow for QR relink.');
+            console.warn('[WARN] RemoteAuth session cleared. Restarting attempts from scratch for QR relink.');
+            try {
+              await client.destroy();
+            } catch (_) {}
             await sleep(2000);
+            attempt = 0;
             continue;
           } catch (resetErr) {
             console.error('[ERROR] Failed clearing RemoteAuth session after timeout:', resetErr?.message || resetErr);
