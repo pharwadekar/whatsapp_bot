@@ -917,16 +917,6 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--disable-gpu',
         '--mute-audio',
         '--no-default-browser-check',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-breakpad',
-        '--disable-component-update',
-        '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter',
-        '--disable-ipc-flooding-protection',
-        '--disable-renderer-backgrounding',
-        '--single-process',
-        '--no-crash-upload',
         '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
       ]
     }
