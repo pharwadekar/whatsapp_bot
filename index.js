@@ -146,12 +146,15 @@ async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
   initInProgress = true;
   waClientReady = false;
   let lastErr;
+  // Reset the flag so every fresh startup cycle gets one chance to clear a bad session.
+  sessionResetAttempted = false;
 
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         console.log(`[INFO] Initializing WhatsApp client (${source}) attempt ${attempt}/${maxAttempts}...`);
         await client.initialize();
+        console.log('[INFO] client.initialize() resolved successfully.');
         return;
       } catch (err) {
         lastErr = err;
@@ -159,28 +162,28 @@ async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
         console.error(`[WARN] Client initialize failed (attempt ${attempt}/${maxAttempts}):`, err?.message || err);
 
         const timedOut = (err?.message || '').includes('Timed out after waiting');
+
+        // After 3 consecutive timeouts, nuke the remote session once and restart
+        // the attempt counter so the bot can show a fresh QR.
         const shouldResetSession =
           timedOut &&
-          attempt === maxAttempts &&
-          process.env.RESET_SESSION_ON_INIT_TIMEOUT === 'true' &&
+          attempt >= 3 &&
           !sessionResetAttempted &&
           store;
 
         if (shouldResetSession) {
           sessionResetAttempted = true;
           try {
-            console.warn('[WARN] Init timed out repeatedly. Clearing RemoteAuth session once to force fresh QR relink...');
+            console.warn('[WARN] 3 consecutive timeouts — clearing RemoteAuth session to force fresh QR relink...');
             await store.delete({ session: 'RemoteAuth-bot-session' });
-            console.warn('[WARN] RemoteAuth session cleared. Restarting attempts from scratch for QR relink.');
-            try {
-              await client.destroy();
-            } catch (_) {}
-            await sleep(2000);
-            attempt = 0;
-            continue;
+            console.warn('[WARN] RemoteAuth session cleared from MongoDB.');
           } catch (resetErr) {
-            console.error('[ERROR] Failed clearing RemoteAuth session after timeout:', resetErr?.message || resetErr);
+            console.error('[ERROR] Failed clearing RemoteAuth session:', resetErr?.message || resetErr);
           }
+          try { await client.destroy(); } catch (_) {}
+          await sleep(3000);
+          attempt = 0; // restart counter (the for-loop increments to 1)
+          continue;
         }
 
         if (!transient || attempt === maxAttempts) {
@@ -593,14 +596,17 @@ let lastReplyTime = 0;
 const userLastReply = new Map();
 
 function setupClient() {
-// ===== QR =====
+
+// ===== BROWSER-LEVEL OBSERVABILITY =====
+// These fire BEFORE any WhatsApp-specific events and tell you whether Chrome
+// even launched and reached a page.
 client.on("qr", (qr) => {
   currentQR = qr;
   qrcode.generate(qr, { small: true });
   console.log("📱 QR Code generated! Go to /qr on your web UI to scan it easily.");
 });
 
-// ===== READY =====
+// Puppeteer page lifecycle — proves Chrome is alive and navigating
 client.on("ready", async () => {
   currentQR = "";
   waClientReady = true;
@@ -921,17 +927,17 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.log("✅ Connected to MongoDB!");
   store = new CustomMongoStore({ mongoose: mongoose });
   client = new Client({
-    authStrategy: new RemoteAuth({        
-      clientId: 'bot-session',      
+    authStrategy: new RemoteAuth({
+      clientId: 'bot-session',
       store: store,
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
-    authTimeoutMs: 240000,
-    webVersionCache: { type: 'local' },
+    authTimeoutMs: 120000,  // 2 min — fail fast so retries can clear bad sessions sooner
+    webVersionCache: { type: 'remote' },  // always fetch latest WA Web version from CDN
     puppeteer: {
-      timeout: 240000,
-      protocolTimeout: 240000,
-      headless: true,
+      timeout: 60000,          // page navigation timeout
+      protocolTimeout: 180000, // CDP protocol timeout
+      headless: 'shell',       // CRITICAL: use old headless mode — new headless breaks WA Web injection
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
@@ -940,17 +946,19 @@ mongoose.connect(process.env.MONGODB_URI, {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
+        '--single-process',
         '--disable-gpu',
         '--mute-audio',
         '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled'
+        '--disable-blink-features=AutomationControlled',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows'
       ]
     }
   });
-  
-// Pre-create the Default folder to prevent RemoteAuth ENOENT crashes
-  const fs = require('fs');
-  const path = require('path');
+
+  // Pre-create the Default folder to prevent RemoteAuth ENOENT crashes
   const sessionPath = path.join(process.cwd(), '.wwebjs_auth', 'session-bot-session', 'Default');
   fs.mkdirSync(sessionPath, { recursive: true });
 
