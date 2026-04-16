@@ -95,6 +95,8 @@ function isTransientSendError(err) {
 function isTransientInitError(err) {
   const msg = (err?.message || '') + (err?.code || '');
   return (
+    msg.includes('Timed out after waiting') ||
+    msg.includes('Navigation timeout') ||
     msg.includes('Execution context was destroyed') ||
     msg.includes('Attempted to use detached Frame') ||
     msg.includes('Target closed') ||
@@ -157,6 +159,14 @@ async function initializeClientWithRetry(source = 'startup', maxAttempts = 6) {
 
         if (!transient || attempt === maxAttempts) {
           throw err;
+        }
+
+        // A failed launch can leave Chromium handles around; clean before retrying.
+        try {
+          await client.destroy();
+          console.log('[INFO] Cleaned up stale Chromium session before retry.');
+        } catch (destroyErr) {
+          console.warn('[WARN] Cleanup before retry failed:', destroyErr?.message || destroyErr);
         }
 
         // Exponential backoff: 2s, 4s, 8s, 16s, 32s, 64s
@@ -531,7 +541,7 @@ app.get('/qr', (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || (process.env.SPACE_ID ? 7860 : 3000);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Approval UI available on port ${PORT}, if local on http://localhost:${PORT}`);
 });
@@ -890,23 +900,35 @@ mongoose.connect(process.env.MONGODB_URI, {
       store: store,
       backupSyncIntervalMs: 1800000 // Only zip/backup every 30 minutes to save memory
     }),
-    authTimeoutMs: 120000,
-      webVersionCache: { type: 'none' }, // Bypass WhatsApp caching bugs
-      puppeteer: {
-        timeout: 120000, // Increase allowed launch time to 2 minutes
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu',
-          '--mute-audio',
-          '--no-default-browser-check',
-          '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+    authTimeoutMs: 240000,
+    webVersionCache: { type: 'none' }, // Avoid stale cached web assets in ephemeral runtimes
+    puppeteer: {
+      timeout: 240000,
+      protocolTimeout: 240000,
       headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-component-update',
+        '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter',
+        '--disable-ipc-flooding-protection',
+        '--disable-renderer-backgrounding',
+        '--single-process',
+        '--no-crash-upload',
+        '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      ]
     }
   });
   
