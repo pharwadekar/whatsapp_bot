@@ -23,6 +23,11 @@
     .approve { background: #25d366; color: white; }
     .reject { background: #ff4b4b; color: white; }
     .empty { text-align: center; color: #888; margin-top: 50px;}
+    .toolbar { display:flex; gap:10px; margin-bottom: 15px; }
+    .toolbar button { border:none; border-radius:8px; padding:10px 12px; font-weight:700; cursor:pointer; }
+    .toolbar .approve-all { background:#1f9d55; color:#fff; }
+    .toolbar .reject-all { background:#d64545; color:#fff; }
+    .route { background: #007bff; color: white; }
 
     /* Chatbot styles */
     .chatbot-panel { margin-top: 40px; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-top: 4px solid #007bff; }
@@ -44,6 +49,10 @@
     <button onclick="generatePDF()" id="btn-gen-pdf" style="background:#ff9800; color:white; border:none; padding:10px 15px; border-radius:6px; cursor:pointer; font-weight:bold; width:100%;">
       Generate & Queue PDF
     </button>
+  </div>
+  <div class="toolbar">
+    <button class="approve-all" onclick="approveAll()">Approve All</button>
+    <button class="reject-all" onclick="rejectAll()">Reject All</button>
   </div>
   <div id="container">Loading...</div>
 
@@ -72,7 +81,8 @@
         const previewButton = item.previewUrl
           ? `<button class="btn-act preview" onclick="previewPdf('${item.id}')">Preview PDF</button>`
           : '';
-        const isBusy = item.status === 'retrying' || item.status === 'sending';
+        const isBusy = item.status === 'retrying' || item.status === 'sending' || item.status === 'pending_route';
+        const isAwaitingRoute = !!item.canRoute;
         const approveLabel = isBusy ? 'Auto-retrying...' : 'Approve / Send';
         const retryInfo = item.nextRetryInSeconds != null ? ` (next in ${item.nextRetryInSeconds}s)` : '';
 
@@ -88,11 +98,12 @@
             <button class="regen" onclick="regenerate('${item.id}')">Rewrite</button>
           </div>
 
-          <textarea id="reply-${item.id}">${item.replyText}</textarea>
+          <textarea id="reply-${item.id}" ${isAwaitingRoute ? 'placeholder="Click Route to OpenAI to generate draft response..."' : ''}>${item.replyText || ''}</textarea>
           <div class="actions">
             ${previewButton}
+            ${isAwaitingRoute ? `<button class="btn-act route" onclick="routeToOpenAI('${item.id}')">Route to OpenAI</button>` : ''}
             <button class="btn-act reject" onclick="reject('${item.id}')">Reject</button>
-            <button class="btn-act approve" onclick="approve('${item.id}')" ${isBusy ? 'disabled' : ''}>${approveLabel}</button>
+            <button class="btn-act approve" onclick="approve('${item.id}')" ${(isBusy || isAwaitingRoute) ? 'disabled' : ''}>${approveLabel}</button>
           </div>
         `;
         container.appendChild(card);
@@ -155,8 +166,56 @@
       loadPending();
     }
 
+    async function routeToOpenAI(id) {
+      const prompt = (document.getElementById('prompt-' + id)?.value || '').trim();
+      const routeButton = document.querySelector(`button.route[onclick="routeToOpenAI('${id}')"]`);
+      if (routeButton) {
+        routeButton.innerText = "Routing...";
+        routeButton.disabled = true;
+      }
+
+      try {
+        const res = await fetch('/api/route/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          alert(data.error || 'Failed to route message to OpenAI.');
+        }
+      } catch(e) {
+        alert('Connection error while routing to OpenAI.');
+      }
+
+      loadPending();
+    }
+
     async function reject(id) {
       await fetch('/api/reject/' + id, { method: 'POST' });
+      loadPending();
+    }
+
+    async function approveAll() {
+      const res = await fetch('/api/approve-all', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Approve All failed.');
+      } else {
+        alert(`Approve All complete. Sent: ${data.sent || 0}, Retrying: ${data.retrying || 0}, Failed: ${data.failed || 0}`);
+      }
+      loadPending();
+    }
+
+    async function rejectAll() {
+      if (!confirm('Reject all pending items?')) return;
+      const res = await fetch('/api/reject-all', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Reject All failed.');
+      } else {
+        alert(`Rejected ${data.rejected || 0} item(s).`);
+      }
       loadPending();
     }
 

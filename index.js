@@ -75,7 +75,7 @@ app.use(express.static('public'));
 
 const PDFDocument = require('pdfkit');
 
-const GROUP_ID = "117991492559076@lid";
+const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID || "120363424889478864@g.us";
 const pendingMessages = new Map();
 const autoRetryTimers = new Map();
 let currentQR = "";
@@ -395,7 +395,7 @@ app.post('/api/generate-pdf', async (req, res) => {
       contextText: '',
       to: 'Main Group',
       mediaPath: filePath,
-      targetGroupId: GROUP_ID
+      targetGroupId: ALLOWED_GROUP_ID
     });
     
     res.json({
@@ -422,6 +422,7 @@ app.get('/api/pending', (req, res) => {
     nextRetryInSeconds: p.nextRetryAt ? Math.max(0, Math.ceil((p.nextRetryAt - Date.now()) / 1000)) : null,
     originalText: p.originalText,
     replyText: p.replyText,
+    canRoute: !p.replyText && (p.status === 'awaiting_route' || p.status === 'pending_route'),
     to: p.to,
     previewUrl: p.mediaPath ? `/api/pdf-preview/${p.id}` : null
   }));
@@ -479,6 +480,50 @@ app.post('/api/approve/:id', async (req, res) => {
   }
 });
 
+// Route an incoming text message to OpenAI (manual step from dashboard)
+app.post('/api/route/:id', async (req, res) => {
+  const id = req.params.id;
+  const pending = pendingMessages.get(id);
+
+  if (!pending) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  if (pending.kind !== 'text') {
+    return res.status(400).json({ error: 'Routing is only available for text messages.' });
+  }
+
+  if (pending.status === 'sending' || pending.status === 'retrying') {
+    return res.status(409).json({ error: 'Cannot route while send is in progress.' });
+  }
+
+  if (pending.replyText && pending.status !== 'awaiting_route' && pending.status !== 'pending_route') {
+    return res.json({ success: true, replyText: pending.replyText, alreadyRouted: true });
+  }
+
+  const customPrompt = (req.body?.prompt || '').trim();
+  const input = customPrompt || pending.originalText;
+
+  if (!input) {
+    return res.status(400).json({ error: 'No text available to route.' });
+  }
+
+  pending.status = 'pending_route';
+  pending.lastError = null;
+
+  try {
+    const reply = await generateReply(input, pending.contextText || '');
+    pending.replyText = reply;
+    pending.approvedText = null;
+    pending.status = 'pending';
+    return res.json({ success: true, replyText: reply });
+  } catch (err) {
+    pending.status = 'awaiting_route';
+    pending.lastError = err?.message || 'Failed to route to OpenAI';
+    return res.status(500).json({ error: pending.lastError });
+  }
+});
+
 // Reject a message
 app.post('/api/reject/:id', (req, res) => {
   const id = req.params.id;
@@ -493,6 +538,52 @@ app.post('/api/reject/:id', (req, res) => {
   } else {
     res.status(404).json({ error: 'Not found' });
   }
+});
+
+// Approve and send every routable pending item
+app.post('/api/approve-all', async (req, res) => {
+  const items = Array.from(pendingMessages.values()).filter(p => !!p.replyText);
+  if (items.length === 0) {
+    return res.json({ success: true, total: 0, sent: 0, retrying: 0, failed: 0 });
+  }
+
+  let sent = 0;
+  let retrying = 0;
+  let failed = 0;
+
+  for (const item of items) {
+    const result = await processApprovedSend(item.id);
+    if (result.ok) {
+      sent += 1;
+    } else if (result.code === 202) {
+      retrying += 1;
+    } else {
+      failed += 1;
+    }
+  }
+
+  res.json({
+    success: true,
+    total: items.length,
+    sent,
+    retrying,
+    failed
+  });
+});
+
+// Reject every pending message in one action
+app.post('/api/reject-all', (req, res) => {
+  let rejected = 0;
+  for (const [id, pending] of pendingMessages.entries()) {
+    clearAutoRetryTimer(id);
+    if (pending.mediaPath && fs.existsSync(pending.mediaPath)) {
+      fs.unlink(pending.mediaPath, () => {});
+    }
+    pendingMessages.delete(id);
+    rejected += 1;
+  }
+
+  res.json({ success: true, rejected });
 });
 
 // Regenerate a message
@@ -694,9 +785,9 @@ client.on("message_create", async (msg) => {
       return;
     }
 
-    // Allow personal chats OR messages sent by you to a personal chat OR specific group
+    // Allow all personal chats, and only one specific group for group messages.
     const isPersonal = msg.from.includes("@c.us") || msg.to.includes("@c.us");
-    const isGroup = msg.from === GROUP_ID || msg.to === GROUP_ID;
+    const isGroup = msg.from === ALLOWED_GROUP_ID || msg.to === ALLOWED_GROUP_ID;
 
     if (!isPersonal && !isGroup) {
       console.log(`[DEBUG] Ignoring - not a personal chat or the allowed group`);
@@ -752,27 +843,24 @@ client.on("message_create", async (msg) => {
     }
     contextText += "---------------------------------------\n";
 
-    // 7. Generate response
-    const reply = await generateReply(cleaned, contextText);
-
-    // 8. Queue for approval instead of sending directly
+    // 7. Queue raw message first. User can decide in dashboard whether to route to OpenAI.
     const id = Date.now().toString();
     pendingMessages.set(id, {
       id,
       kind: 'text',
-      status: 'pending',
+      status: 'awaiting_route',
       sendAttempts: 0,
       maxAttempts: AUTO_RETRY_MAX_ATTEMPTS,
       approvedText: null,
       lastError: null,
       nextRetryAt: null,
       msg: msg,
-      replyText: reply,
+      replyText: '',
       originalText: msg.body,
       contextText: contextText,
       to: msg.fromMe ? "Myself" : (chat.name || msg.from)
     });
-    console.log(`[DEBUG] Message queued for approval (ID: ${id}). Go to UI to approve.`);
+    console.log(`[DEBUG] Message queued (ID: ${id}). Route to OpenAI from UI before approving.`);
 
     // 9. Update cooldowns
     lastReplyTime = now;
